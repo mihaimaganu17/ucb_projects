@@ -36,10 +36,12 @@ process_execute (const char *file_name)
   sema_init (&temporary, 0);
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
+  enum palloc_flags page_flag = PAL_ZERO | PAL_USER;
   fn_copy = palloc_get_page (0);
   if (fn_copy == NULL)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
+  printf("%s", fn_copy);
 
   /* Create a new thread to execute FILE_NAME. */
   tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
@@ -66,9 +68,9 @@ start_process (void *file_name_)
 
   /* If load failed, quit. */
   palloc_free_page (file_name);
-  if (!success)
+  if (!success){
     thread_exit ();
-
+  }
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
      threads/intr-stubs.S).  Because intr_exit takes all of its
@@ -310,6 +312,9 @@ load (const char *file_name, void (**eip) (void), void **esp)
   if (!setup_stack (esp))
     goto done;
 
+  /* MAG: sub esp for argv, argc and ret addr to be pushed */
+  *esp -= strlen(file_name) + 1;
+  *esp -= 2 * sizeof(int);
   /* Start address. */
   *eip = (void (*) (void)) ehdr.e_entry;
 
