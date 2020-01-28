@@ -3,10 +3,7 @@ Design Document for Project 1: User Programs
 
 ## Group Members
 
-* FirstName LastName <email@domain.example>
-* FirstName LastName <email@domain.example>
-* FirstName LastName <email@domain.example>
-* FirstName LastName <email@domain.example>
+* Mihai Maganu <maganu.mihu@gmail.com>
 
 # Getting Acquainted with Pintos
 
