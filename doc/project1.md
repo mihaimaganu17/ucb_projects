@@ -50,3 +50,10 @@ Design Document for Project 1: User Programs
 
 10. Values of `if_` structure:
   eip = 0x8048754 and esp = 0xc0000000
+
+14. Tot two values of the stack are: `0x000000a2` and `0x00000001`
+
+15. Same values
+
+16. A semaphore is used in order for the OS to make a mutual exclusion of the critical section where the current thread(which is dying)
+  will be switched with another thread, and to make sure, it is not switched at the same time by another running thread:
