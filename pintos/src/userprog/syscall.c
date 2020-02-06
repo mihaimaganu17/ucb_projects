@@ -31,4 +31,22 @@ syscall_handler (struct intr_frame *f UNUSED)
     printf("%s: exit(%d)\n", &thread_current ()->name, args[1]);
     thread_exit();
   }
+
+  /* Implement write syscall */
+  if(args[0] == SYS_WRITE){
+    /* f->eax if we want to return any value */
+    /* args[1] = fd
+       args[2] = pointer to the buffer
+       args[3] = size of the buffer */
+    f->eax = write(args[1], args[2], args[3]);
+  }
+}
+
+int write(int fd, const void *buffer, unsigned size){
+  /* Print to console */
+  if(fd == 1){
+    const char *buff = buffer;
+    putbuf(buff, size);
+    return size;
+  }
 }

@@ -41,7 +41,6 @@ process_execute (const char *file_name)
   if (fn_copy == NULL)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
-  printf("%s", fn_copy);
 
   /* Create a new thread to execute FILE_NAME. */
   tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
@@ -55,6 +54,9 @@ process_execute (const char *file_name)
 static void
 start_process (void *file_name_)
 {
+  /* Make file_name a struct based on pintos lists
+     Each argv will be represented as a list node
+     And argc will be the size of the list */
   char *file_name = file_name_;
   struct intr_frame if_;
   bool success;
@@ -312,9 +314,16 @@ load (const char *file_name, void (**eip) (void), void **esp)
   if (!setup_stack (esp))
     goto done;
 
-  /* MAG: sub esp for argv, argc and ret addr to be pushed */
-  *esp -= strlen(file_name) + 1;
-  *esp -= 2 * sizeof(int);
+  /* MAG: sub esp for argv, argc and ret addr to be pushed 
+     Besides argv, we also need to push argc, argv, argv[0], argv[1](null pointer sentinel) and ret value so + 4 * sizeof(int)
+     We only have argv[0] beacause we did not implement arg parsing
+     Also need to align buffer on the stack to 16-bytes 
+     so we use ((x-1) | (16 - 1)) + 1, where x = total size of args pushed 
+      */
+  int argv_size = strlen(file_name) + 1;
+  int align_stack = ((argv_size - 1) | (0x10 - 1)) + 1;
+  int final_esp = align_stack + 3*sizeof(char**) + sizeof(int) + sizeof(void*);
+  *esp -= final_esp;
   /* Start address. */
   *eip = (void (*) (void)) ehdr.e_entry;
 
