@@ -22,6 +22,12 @@
 static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
+/* Take an const char argument representing the call command 
+   Returns a pintos list */
+static void create_args_list(args_list_t *argsl, char *cmd, unsigned int *argv_size);
+/* Takes a pintos list of argvs
+   Pushes them on the stack represented by esp */
+static void push_args(args_list_t *args_list, void **esp, unsigned int argv_size);
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
@@ -36,14 +42,21 @@ process_execute (const char *file_name)
   sema_init (&temporary, 0);
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
-  enum palloc_flags page_flag = PAL_ZERO | PAL_USER;
   fn_copy = palloc_get_page (0);
   if (fn_copy == NULL)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
+  char *th_name = palloc_get_page(0);
+  unsigned int i = 0;
+  while(file_name[i] != ' ' && i < strlen(file_name)){
+    th_name[i] = file_name[i];
+    i += 1;
+  }
+  th_name[i] = '\0';
+
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (th_name, PRI_DEFAULT, start_process, fn_copy);
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy);
   return tid;
@@ -61,15 +74,26 @@ start_process (void *file_name_)
   struct intr_frame if_;
   bool success;
 
+  /* MAG: parse argvs before loading file*/
+  args_list_t args_l;
+  unsigned int argv_size = 0;
+  create_args_list(&args_l, file_name, &argv_size);
+
+  /* MAG: last element of list is the filename */
+  struct list_elem *e;
+  e = list_rbegin(&args_l);
+  argv_t *filename;
+  filename = list_entry(e, argv_t, elem);
+
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
-
+  success = load (filename->value, &if_.eip, &if_.esp);
+  
+  push_args(&args_l, &if_.esp, argv_size);
   /* If load failed, quit. */
-  palloc_free_page (file_name);
   if (!success){
     thread_exit ();
   }
@@ -81,6 +105,94 @@ start_process (void *file_name_)
      and jump to it. */
   asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
   NOT_REACHED ();
+}
+
+void push_args(args_list_t *args_list, void **esp, unsigned int argv_size){
+  /* Compute stack alignment to 16-byte(0x10) */
+  unsigned int align_stack = ((argv_size - 1) | (0x10 - 1)) + 1;
+  unsigned int diff_align = align_stack - argv_size;
+  /* Iterate through the list, push the argv string on stack and save pointer*/
+  argv_t *arg;
+  struct list_elem *e;
+  /* Len of the string to be pushed */
+  unsigned int nargv;
+  for(e = list_begin(args_list); e != list_end(args_list); e = list_next(e)){
+    arg = list_entry(e, argv_t, elem);
+    nargv = strlen(arg->value) + 1;
+    *esp -= nargv;
+    memcpy(*esp, arg->value, nargv);
+    arg->vaddr = (unsigned int) *esp; 
+  }
+
+  /* Align stack */
+  *esp -= diff_align;
+  /* Push sentinel on the stack -> argv[argc] */
+  *esp -= sizeof(char *);
+  memset(*esp, 0, sizeof(char*));
+  
+  /* Push argv address pointers */
+  for(e = list_begin(args_list); e != list_end(args_list); e = list_next(e)){
+    arg = list_entry(e, argv_t, elem);
+    *esp -= sizeof(unsigned int);
+    memcpy(*esp, &(arg->vaddr), sizeof(unsigned int));
+  }
+  /* Push argv = address of argv[0] pointer, 
+     argc and return address */
+  unsigned int argv_start = (unsigned int) *esp;
+  *esp -= sizeof(unsigned int);
+  memcpy(*esp, &argv_start, sizeof(unsigned int));
+
+  size_t argc = list_size(args_list);
+  *esp -= sizeof(unsigned int);
+  memcpy(*esp, &argc, sizeof(unsigned int));
+
+  *esp -= sizeof(void *);
+}
+
+/* Parses cmd and created a new pintos list with argv */
+void create_args_list(args_list_t *argvl, char *cmd, unsigned int *argv_size){
+  if(cmd == NULL){
+    return;
+  }
+  list_init(argvl);
+
+  char *delim = " \t";
+  char *str1 = cmd;
+  char *token;
+  char *saveptr;
+  /* Total size of strings pushed used to align memory */
+  *argv_size = 0;
+  //add_argv(argvl, tkn);
+  for(token = strtok_r(str1, delim, &saveptr);
+    token != NULL;
+    token = strtok_r(NULL, delim, &saveptr)){
+    /* Push string with virtual address
+       Until it is pushed on the stack */
+    *argv_size += strlen(token) + 1;
+    if(add_argv(argvl, token, 0) == NULL){
+      printf("ERR: Could not add argv to list\n");
+    }
+  }
+ 
+  // TODO: free argvl page
+  // TODO: add args to list
+  // TODO: need to make a single function
+}
+
+argv_t *add_argv(args_list_t *args, char *argv, unsigned int vaddr){
+  argv_t *arg = palloc_get_page(0);
+  arg->value = palloc_get_page(0);
+  strlcpy(arg->value, argv, (strlen(argv) + 1));
+  /* Check vaddr to not access kernel */
+  if(vaddr < (unsigned int)PHYS_BASE){
+    arg->vaddr = vaddr;
+  } else {
+    printf("Virtual address exceeds userspace bounds -> %d\n", vaddr);
+    return NULL;
+  }
+  /* Push front so that the last argv becomes the first */
+  list_push_front(args, &(arg->elem));
+  return arg;
 }
 
 /* Waits for thread TID to die and returns its exit status.  If
@@ -314,16 +426,6 @@ load (const char *file_name, void (**eip) (void), void **esp)
   if (!setup_stack (esp))
     goto done;
 
-  /* MAG: sub esp for argv, argc and ret addr to be pushed 
-     Besides argv, we also need to push argc, argv, argv[0], argv[1](null pointer sentinel) and ret value so + 4 * sizeof(int)
-     We only have argv[0] beacause we did not implement arg parsing
-     Also need to align buffer on the stack to 16-bytes 
-     so we use ((x-1) | (16 - 1)) + 1, where x = total size of args pushed 
-      */
-  int argv_size = strlen(file_name) + 1;
-  int align_stack = ((argv_size - 1) | (0x10 - 1)) + 1;
-  int final_esp = align_stack + 3*sizeof(char**) + sizeof(int) + sizeof(void*);
-  *esp -= final_esp;
   /* Start address. */
   *eip = (void (*) (void)) ehdr.e_entry;
 

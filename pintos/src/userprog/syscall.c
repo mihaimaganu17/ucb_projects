@@ -40,8 +40,18 @@ syscall_handler (struct intr_frame *f UNUSED)
        args[3] = size of the buffer */
     f->eax = write(args[1], args[2], args[3]);
   }
+
+  if(args[0] == SYS_PRACTICE){
+    f->eax = practice(args[1]);
+  }
 }
 
+/* Process syscalls */
+int practice(int i){
+  return (i+1);
+}
+
+/* File syscalls */
 int write(int fd, const void *buffer, unsigned size){
   /* Print to console */
   if(fd == 1){
