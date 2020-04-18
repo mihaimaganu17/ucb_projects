@@ -19,7 +19,8 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 
-static struct semaphore temporary;
+#include "userprog/syscall.h"
+
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
 /* Take an const char argument representing the call command 
@@ -39,38 +40,70 @@ process_execute (const char *file_name)
   char *fn_copy;
   tid_t tid;
 
-  sema_init (&temporary, 0);
+  if (file_name == NULL){
+    goto err_create;
+  }
+ 
+  struct process_control_block *pcb = palloc_get_page(0);
+  if (pcb == NULL){
+    goto err_create; 
+  }
+
+  pcb->parent_thread = thread_current(); 
+  list_init(&pcb->parent_thread->child_list);
+
+  /* Lock both semaphores */
+  sema_init (&pcb->proc_init, 0);
+  sema_init (&pcb->wait, 0);
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page (0);
   if (fn_copy == NULL)
-    return TID_ERROR;
+    goto err_create;
   strlcpy (fn_copy, file_name, PGSIZE);
 
   char *th_name = palloc_get_page(0);
+  if(th_name == NULL){
+    goto err_create;
+  }
   unsigned int i = 0;
   while(file_name[i] != ' ' && i < strlen(file_name)){
     th_name[i] = file_name[i];
     i += 1;
   }
   th_name[i] = '\0';
+  pcb->executing_file = fn_copy;
 
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (th_name, PRI_DEFAULT, start_process, fn_copy);
-  if (tid == TID_ERROR)
-    palloc_free_page (fn_copy);
-  return tid;
+  tid = thread_create (th_name, PRI_DEFAULT, start_process, pcb);
+
+  /* This waits for process initialization */
+  sema_down(&pcb->proc_init);
+
+  if (pcb->pid == PID_ERROR)
+    goto err_create;
+  else {
+    pcb->pid = tid;
+  }
+
+  return pcb->pid;
+
+err_create:
+  if(pcb) palloc_free_page(pcb);
+  if(fn_copy) palloc_free_page(fn_copy);
+  return TID_ERROR;
 }
 
 /* A thread function that loads a user process and starts it
    running. */
 static void
-start_process (void *file_name_)
+start_process (void *pcb_)
 {
+  struct process_control_block *pcb = pcb_;
   /* Make file_name a struct based on pintos lists
      Each argv will be represented as a list node
      And argc will be the size of the list */
-  char *file_name = file_name_;
+  char *file_name = pcb->executing_file;
   struct intr_frame if_;
   bool success;
 
@@ -91,12 +124,26 @@ start_process (void *file_name_)
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = load (filename->value, &if_.eip, &if_.esp);
+
+  /* Add the current thread as a child to the parent thread */
+  thread_current()->pcb = pcb;
+  list_push_back(&pcb->parent_thread->child_list, &pcb->elem); 
   
-  push_args(&args_l, &if_.esp, argv_size);
-  /* If load failed, quit. */
   if (!success){
-    thread_exit ();
+    pcb->pid = PID_ERROR;
   }
+
+  /* Release lock after the process has/has not been successfully loaded */
+  sema_up(&pcb->proc_init);
+
+  /* If load failed, quit. */
+  if(pcb->pid == PID_ERROR){
+    sys_exit(-1);
+  }
+  /* Push args before calling the process */
+  push_args(&args_l, &if_.esp, argv_size);
+  
+
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
      threads/intr-stubs.S).  Because intr_exit takes all of its
@@ -108,9 +155,12 @@ start_process (void *file_name_)
 }
 
 void push_args(args_list_t *args_list, void **esp, unsigned int argv_size){
-  /* Compute stack alignment to 16-byte(0x10) */
-  unsigned int align_stack = ((argv_size - 1) | (0x10 - 1)) + 1;
-  unsigned int diff_align = align_stack - argv_size;
+  /* Compute stack alignment to 16-byte(0x10) 
+     Since the stack "grows" downward we sub 0x10
+     to get the previous multiple of 16*/
+  unsigned int total_arg_size = argv_size + (list_size(args_list) + 3) * sizeof(char*);
+  unsigned int align_stack = ((total_arg_size - 1) | (0x10 - 1)) + 1;
+  unsigned int diff_align = align_stack - total_arg_size;
   /* Iterate through the list, push the argv string on stack and save pointer*/
   argv_t *arg;
   struct list_elem *e;
@@ -207,8 +257,46 @@ argv_t *add_argv(args_list_t *args, char *argv, unsigned int vaddr){
 int
 process_wait (tid_t child_tid UNUSED)
 {
-  sema_down (&temporary);
-  return 0;
+  struct process_control_block *child_proc = NULL;
+  /* Get the child process of the current thread by child_tid */
+  struct thread *curr_th = thread_current();
+  struct list_elem *e;
+
+  if(!list_empty(&curr_th->child_list)) {
+    for(e = list_begin(&curr_th->child_list);
+        e != list_end(&curr_th->child_list);
+        e = list_next(e)){
+      struct process_control_block *pcb = list_entry(e, struct process_control_block, elem);
+      if(pcb->pid == child_tid){
+        child_proc = pcb;
+        break;
+      }
+    }
+  } else {
+    goto err_wait;
+  }
+
+  /* Check if there was an error with the process we are waiting */
+  if(child_proc->pid == -1){
+    goto err_wait;
+  }
+  if(!child_proc){
+    goto err_wait;
+  }
+
+  /* MAG: Check if wait has already been called for this TID */
+  if(child_proc->waiting == true){
+    goto err_wait;
+  } else {
+    child_proc->waiting = true;
+  }
+  /* Wait for the child process to finish */
+  sema_down(&child_proc->wait);
+
+  return child_proc->exit_status; 
+err_wait:
+  if(child_proc) palloc_free_page(child_proc);
+  return -1;
 }
 
 /* Free the current process's resources. */
@@ -216,6 +304,9 @@ void
 process_exit (void)
 {
   struct thread *cur = thread_current ();
+
+  /* Add sema_up to release process_wait() */
+  sema_up(&cur->pcb->wait);
   uint32_t *pd;
 
   /* Destroy the current process's page directory and switch back
@@ -234,7 +325,7 @@ process_exit (void)
       pagedir_activate (NULL);
       pagedir_destroy (pd);
     }
-  sema_up (&temporary);
+
 }
 
 /* Sets up the CPU for running user code in the current

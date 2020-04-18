@@ -275,6 +275,19 @@ thread_tid (void)
   return thread_current ()->tid;
 }
 
+/* MAG: Returns the thread by tid_t */
+struct thread *get_thread(tid_t tid){
+  struct list_elem *e;
+  struct thread *th;
+  for(e = list_begin(&all_list); e != list_end(&all_list); e = list_next(e)){
+    th = list_entry(e, struct thread, elem);
+    if(th->tid == tid){
+      return th;
+    }
+  }
+  return NULL;
+}
+
 /* Deschedules the current thread and destroys it.  Never
    returns to the caller. */
 void

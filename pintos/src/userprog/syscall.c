@@ -7,6 +7,7 @@
 
 #include "threads/vaddr.h"
 #include "userprog/pagedir.h"
+#include "userprog/process.h"
 
 static void syscall_handler (struct intr_frame *);
 /* MAG: Function to check validity of a user-provided pointer 
@@ -42,8 +43,7 @@ syscall_handler (struct intr_frame *f UNUSED)
   if (args[0] == SYS_EXIT) {
     check_pointer(args+1);
     f->eax = args[1];
-    printf("%s: exit(%d)\n", &thread_current ()->name, args[1]);
-    thread_exit();
+    sys_exit(args[1]);
   }
 
   /* Implement write syscall */
@@ -56,22 +56,50 @@ syscall_handler (struct intr_frame *f UNUSED)
     check_pointer(args+2);
     check_pointer((uint32_t *)args[2]);
     check_pointer(args+3);
-    f->eax = write(args[1], args[2], args[3]);
+    f->eax = sys_write(args[1], (const void *)args[2], args[3]);
   }
 
   if(args[0] == SYS_PRACTICE){
     check_pointer(args+1);
-    f->eax = practice(args[1]);
+    f->eax = sys_practice(args[1]);
   }
 
   if(args[0] == SYS_HALT){
     shutdown_power_off();
   }
+
+  if(args[0] == SYS_EXEC){
+    /* MAG: args[1] is a pointer to a string i
+       We need to check both the pointer and the strings that it points to */
+    check_pointer(args+1);
+    check_pointer((uint32_t *)args[1]);
+    f->eax = sys_exec((const char *)args[1]);
+  }
+
+  if(args[0] == SYS_WAIT){
+    check_pointer(args+1);
+    f->eax = wait(args[1]);
+  }
 }
 
 /* Process syscalls */
-int practice(int i){
+int sys_practice(int i){
   return (i+1);
+}
+
+void sys_exit(int status){
+  thread_current()->pcb->exit_status = status;
+  printf("%s: exit(%d)\n", &thread_current ()->name, status);
+  thread_exit();
+}
+
+pid_t sys_exec(const char *cmd_line){
+  /* MAG: Map tid_t and pid_t 1:1 */
+  return process_execute(cmd_line);
+}
+
+int wait(pid_t pid){
+  return process_wait(pid);
 }
 
 static void check_pointer(uint32_t *ptr){
@@ -111,11 +139,12 @@ TODO: Check if value pointed by esp is a pointer or just a value
 }
 
 /* File syscalls */
-int write(int fd, const void *buffer, unsigned size){
+int sys_write(int fd, const void *buffer, unsigned size){
   /* Print to console */
   if(fd == 1){
     const char *buff = buffer;
     putbuf(buff, size);
     return size;
   }
+  return 0;
 }

@@ -98,6 +98,10 @@ struct thread
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
+    /* MAG: added in project 1.2 */
+    /* TODO: init the list */
+    struct list child_list;             /* List of child threads spawned from this thread*/
+    struct process_control_block *pcb;  /* Process that runs on this thread */
 #endif
 
     /* Owned by thread.c. */
@@ -122,6 +126,7 @@ void thread_block (void);
 void thread_unblock (struct thread *);
 
 struct thread *thread_current (void);
+struct thread *get_thread(tid_t);
 tid_t thread_tid (void);
 const char *thread_name (void);
 
