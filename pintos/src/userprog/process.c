@@ -50,7 +50,8 @@ process_execute (const char *file_name)
   }
 
   pcb->parent_thread = thread_current(); 
-  list_init(&pcb->parent_thread->child_list);
+  pcb->exited = false;
+  pcb->is_orphan = false;
 
   /* Lock both semaphores */
   sema_init (&pcb->proc_init, 0);
@@ -83,7 +84,8 @@ process_execute (const char *file_name)
   if (pcb->pid == PID_ERROR)
     goto err_create;
   else {
-    pcb->pid = tid;
+    /* Add the child processes to our curr_th child_list */
+    list_push_back(&pcb->parent_thread->child_list, &pcb->elem);
   }
 
   return pcb->pid;
@@ -126,13 +128,14 @@ start_process (void *pcb_)
   success = load (filename->value, &if_.eip, &if_.esp);
 
   /* Add the current thread as a child to the parent thread */
-  thread_current()->pcb = pcb;
-  list_push_back(&pcb->parent_thread->child_list, &pcb->elem); 
+  struct thread *curr_th = thread_current();
+  curr_th->pcb = pcb;
   
   if (!success){
     pcb->pid = PID_ERROR;
+  } else {
+    pcb->pid = curr_th->tid;
   }
-
   /* Release lock after the process has/has not been successfully loaded */
   sema_up(&pcb->proc_init);
 
@@ -262,6 +265,13 @@ process_wait (tid_t child_tid UNUSED)
   struct thread *curr_th = thread_current();
   struct list_elem *e;
 
+  /* Exit status must be -1, but tid is the thread identifier */
+
+  /* Check if tid was terminated by the kernel */
+  if(child_tid == -1){
+    goto err_wait;
+  }
+
   if(!list_empty(&curr_th->child_list)) {
     for(e = list_begin(&curr_th->child_list);
         e != list_end(&curr_th->child_list);
@@ -276,24 +286,33 @@ process_wait (tid_t child_tid UNUSED)
     goto err_wait;
   }
 
-  /* Check if there was an error with the process we are waiting */
-  if(child_proc->pid == -1){
-    goto err_wait;
-  }
   if(!child_proc){
-    goto err_wait;
+    return -1;
   }
 
   /* MAG: Check if wait has already been called for this TID */
   if(child_proc->waiting == true){
-    goto err_wait;
+    return -1;
   } else {
     child_proc->waiting = true;
   }
-  /* Wait for the child process to finish */
-  sema_down(&child_proc->wait);
 
-  return child_proc->exit_status; 
+  /* Wait for the child process to finish */
+  if(child_proc->exited == false){
+    sema_down(&child_proc->wait);
+  }
+
+  /* Save the exit status of the child process */
+  int exit_status = child_proc->exit_status;
+  
+  ASSERT(e != NULL);
+  /* Remove from child list as we know it returned */
+  list_remove(e);
+  /* Free the resources */
+  palloc_free_page(child_proc);
+
+  return exit_status; 
+
 err_wait:
   if(child_proc) palloc_free_page(child_proc);
   return -1;
@@ -303,15 +322,42 @@ err_wait:
 void
 process_exit (void)
 {
-  struct thread *cur = thread_current ();
+  struct thread *curr_th = thread_current ();
+  
+  /* MAG: iterate through the entire list of child processes
+     and assign them the proper status */
+  while(!list_empty(&curr_th->child_list)){
+    struct list_elem *e = list_pop_front(&curr_th->child_list);
+    struct process_control_block *curr_proc = list_entry(e, struct process_control_block, elem);
+    if(curr_proc->exited){
+      /* Child already exited so we can free the resources */
+      palloc_free_page(curr_proc);
+    } else {
+      /* Flag the process as orphan */
+      curr_proc->is_orphan = true;
+      /* Remove the link with the thread */
+      curr_proc->parent_thread = NULL;
+    }
+  }
 
+
+  /* Flag the current process as exited */
+  curr_th->pcb->exited = true;
+  /* Save the orphan status as it may not be accessible when the process exits */
+  bool is_curr_orphan = curr_th->pcb->is_orphan;
   /* Add sema_up to release process_wait() */
-  sema_up(&cur->pcb->wait);
+  sema_up(&curr_th->pcb->wait);
+
+  /* If process remained as orphan free its resources */
+  if(is_curr_orphan){
+    palloc_free_page(&curr_th->pcb);
+  }
+
   uint32_t *pd;
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
-  pd = cur->pagedir;
+  pd = curr_th->pagedir;
   if (pd != NULL)
     {
       /* Correct ordering here is crucial.  We must set
@@ -321,7 +367,7 @@ process_exit (void)
          directory before destroying the process's page
          directory, or our active page directory will be one
          that's been freed (and cleared). */
-      cur->pagedir = NULL;
+      curr_th->pagedir = NULL;
       pagedir_activate (NULL);
       pagedir_destroy (pd);
     }

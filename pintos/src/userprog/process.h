@@ -31,11 +31,13 @@ struct process_control_block{
   int exit_status;
   char *executing_file;         /* Name/path of the file to execute */
   
-  struct thread *parent_thread;  /* Thread that runs for this process*/
+  struct thread *parent_thread; /* Thread that runs for this process*/
   bool waiting;                 /* Flag to check if the process is already waiting */
+  bool exited;                  /* Flag to check if the process already exited */
+  bool is_orphan;               /* Flag to check if the parent process exited before this process */
   struct semaphore proc_init;   /* Semaphore that blocks until 
                                    start_process loads the process into memory */
-  struct semaphore wait;     /* Semaphore used for process_wait */
+  struct semaphore wait;        /* Semaphore used for process_wait */
 }; 
 
 argv_t *add_argv(args_list_t *args, char *argv, unsigned int vaddr);

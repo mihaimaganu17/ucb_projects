@@ -20,7 +20,7 @@ void sys_exit(int status);
 pid_t sys_exec(const char *cmdline);
 
 /* Waits for a child process pid and retrieves the child’s exit status. */
-int wait(pid_t pid);
+int sys_wait(pid_t pid);
 
 /* File system calls */
 int sys_write(int fd, const void *buffer, unsigned size);

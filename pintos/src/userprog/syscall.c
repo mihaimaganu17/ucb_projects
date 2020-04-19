@@ -78,7 +78,7 @@ syscall_handler (struct intr_frame *f UNUSED)
 
   if(args[0] == SYS_WAIT){
     check_pointer(args+1);
-    f->eax = wait(args[1]);
+    f->eax = sys_wait(args[1]);
   }
 }
 
@@ -98,13 +98,16 @@ pid_t sys_exec(const char *cmd_line){
   return process_execute(cmd_line);
 }
 
-int wait(pid_t pid){
+int sys_wait(pid_t pid){
   return process_wait(pid);
 }
 
 static void check_pointer(uint32_t *ptr){
+  /* MAG: check the stack pointer for validity */
   if (!is_valid_esp(ptr)){
     printf("%s: exit(-1)\n", &thread_current ()->name);
+    /* If is not valid also update the exit status */
+    thread_current()->pcb->exit_status = -1;
     thread_exit();
   }
 }
