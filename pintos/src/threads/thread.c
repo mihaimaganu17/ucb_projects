@@ -296,6 +296,7 @@ thread_exit (void)
   ASSERT (!intr_context ());
 
 #ifdef USERPROG
+  printf("%s: exit(%d)\n", thread_current()->name, thread_current()->pcb->exit_status);
   process_exit ();
 #endif
 
@@ -481,6 +482,8 @@ init_thread (struct thread *t, const char *name, int priority)
   list_push_back (&all_list, &t->allelem);
   /* MAG: init child list */
   list_init(&t->child_list);
+  /* MAG: init file descriptor list */
+  list_init(&t->fd_list);
   intr_set_level (old_level);
 }
 

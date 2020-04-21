@@ -99,8 +99,9 @@ struct thread
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
     /* MAG: added in project 1.2 */
-    /* TODO: init the list */
+    struct file *curr_file;             /* Link to current file inode that is executing */
     struct list child_list;             /* List of child threads spawned from this thread*/
+    struct list fd_list;                /* List of file descriptors opened by pcb */
     struct process_control_block *pcb;  /* Process that runs on this thread */
 #endif
 

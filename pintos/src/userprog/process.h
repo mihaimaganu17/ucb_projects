@@ -38,7 +38,15 @@ struct process_control_block{
   struct semaphore proc_init;   /* Semaphore that blocks until 
                                    start_process loads the process into memory */
   struct semaphore wait;        /* Semaphore used for process_wait */
+  int last_fd;                  /* Last file descriptor opened */
 }; 
+
+/* FD: File descriptor struct */
+struct file_descriptor{
+  int fd;                       /* Int representing handle for the file */
+  struct file *file;            /* Link to struct file for file.c */
+  struct list_elem elem;        /* Used to iterate over file_descriptors list in thread.h */
+};
 
 argv_t *add_argv(args_list_t *args, char *argv, unsigned int vaddr);
 

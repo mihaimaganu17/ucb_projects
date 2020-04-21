@@ -49,6 +49,8 @@ process_execute (const char *file_name)
     goto err_create; 
   }
 
+  /* Assign exit status to error in case kernel kills the process */
+  pcb->exit_status = -1;
   pcb->parent_thread = thread_current(); 
   pcb->exited = false;
   pcb->is_orphan = false;
@@ -74,6 +76,7 @@ process_execute (const char *file_name)
   }
   th_name[i] = '\0';
   pcb->executing_file = fn_copy;
+  pcb->last_fd = 2;
 
   /* Create a new thread to execute FILE_NAME. */
   tid = thread_create (th_name, PRI_DEFAULT, start_process, pcb);
@@ -106,6 +109,7 @@ start_process (void *pcb_)
      Each argv will be represented as a list node
      And argc will be the size of the list */
   char *file_name = pcb->executing_file;
+  struct thread *curr_th = thread_current();
   struct intr_frame if_;
   bool success;
 
@@ -125,10 +129,16 @@ start_process (void *pcb_)
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
+
+
+  /* Also deny writes to this file while running */
+  curr_th->curr_file = filesys_open(file_name);
+  if (curr_th->curr_file != NULL) {
+    file_deny_write (curr_th->curr_file);
+  }
   success = load (filename->value, &if_.eip, &if_.esp);
 
   /* Add the current thread as a child to the parent thread */
-  struct thread *curr_th = thread_current();
   curr_th->pcb = pcb;
   
   if (!success){
@@ -324,6 +334,22 @@ process_exit (void)
 {
   struct thread *curr_th = thread_current ();
   
+  /* MAG: Close all fds associated with the process */
+  while (!list_empty(&curr_th->fd_list)) {
+    struct list_elem *e = list_pop_front(&curr_th->fd_list);
+    struct file_descriptor *curr_fd = list_entry(e, struct file_descriptor, elem);
+    if (curr_fd != NULL) {
+      file_close(curr_fd->file);
+      palloc_free_page(curr_fd);
+    }
+  }
+
+  /* Allow write */
+  if (curr_th->curr_file != NULL) {
+    file_allow_write(curr_th->curr_file);
+    file_close(curr_th->curr_file);
+  }
+
   /* MAG: iterate through the entire list of child processes
      and assign them the proper status */
   while(!list_empty(&curr_th->child_list)){
@@ -343,11 +369,13 @@ process_exit (void)
 
   /* Flag the current process as exited */
   curr_th->pcb->exited = true;
+
+
   /* Save the orphan status as it may not be accessible when the process exits */
   bool is_curr_orphan = curr_th->pcb->is_orphan;
   /* Add sema_up to release process_wait() */
   sema_up(&curr_th->pcb->wait);
-
+ 
   /* If process remained as orphan free its resources */
   if(is_curr_orphan){
     palloc_free_page(&curr_th->pcb);
