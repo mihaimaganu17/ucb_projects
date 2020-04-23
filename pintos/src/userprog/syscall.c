@@ -143,16 +143,25 @@ syscall_handler (struct intr_frame *f UNUSED)
 
 /* File system calls */
 bool sys_create(const char *file, unsigned initial_size){
+  lock_acquire(&file_lock);
   bool creation_status = filesys_create(file, initial_size);
+  lock_release(&file_lock);
   return creation_status;
 }
 
 int sys_open(const char *file){
+  lock_acquire(&file_lock);
   struct file_descriptor *fd = NULL;
   fd = palloc_get_page(0);
+  if (fd == NULL) {
+    lock_release(&file_lock);
+    return -1;
+  }
 
   fd->file = filesys_open(file);
   if (fd->file == NULL) {
+    palloc_free_page(fd);
+    lock_release(&file_lock);
     return -1;
   }
   /* Assign fd value to our file structure */
@@ -160,6 +169,8 @@ int sys_open(const char *file){
   fd->fd = curr_th->pcb->last_fd++;
   /* Add it to the file descriptors list */
   list_push_back(&curr_th->fd_list, &fd->elem);
+  lock_release(&file_lock);
+
   return fd->fd;
 }
 
@@ -225,9 +236,7 @@ int sys_write(int fd, const void *buffer, unsigned size){
     nbytes = file_write(curr_fd->file, buffer, size);
     lock_release(&file_lock);
     return nbytes;
-  }
-  
-  return 0;
+  }  
 }
 
 void sys_seek(int fd, unsigned position){
@@ -249,7 +258,10 @@ unsigned sys_tell(int fd){
 void sys_close(int fd){
   struct file_descriptor *curr_fd = get_file_descriptor(fd);
   if (curr_fd != NULL) {
-    file_close(curr_fd->file);
+    /* Check if file has been closed before */
+    if (curr_fd->file != NULL) {
+      file_close(curr_fd->file);
+    }
     /* Remove file from fd list */
     list_remove(&curr_fd->elem);
     palloc_free_page(curr_fd);
@@ -297,9 +309,11 @@ static void check_pointer(uint32_t *ptr){
   /* MAG: check the stack pointer for validity */
   if (!is_valid_esp(ptr)){
     //printf("%s: exit(-1)\n", &thread_current ()->name);
-    /* If is not valid also update the exit status */
-    thread_current()->pcb->exit_status = -1;
-    thread_exit();
+    /* Release lock if is currently hold by thread */
+    if (lock_held_by_current_thread(&file_lock)) {
+      lock_release(&file_lock);
+    }
+    sys_exit(-1);
   }
 }
 

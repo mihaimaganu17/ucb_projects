@@ -52,8 +52,11 @@ process_execute (const char *file_name)
   /* Assign exit status to error in case kernel kills the process */
   pcb->exit_status = -1;
   pcb->parent_thread = thread_current(); 
+  pcb->waiting = false;
   pcb->exited = false;
   pcb->is_orphan = false;
+  /* 0 - stdin and 1 - stdout so we start at fd = 2 */
+  pcb->last_fd = 2;
 
   /* Lock both semaphores */
   sema_init (&pcb->proc_init, 0);
@@ -76,10 +79,13 @@ process_execute (const char *file_name)
   }
   th_name[i] = '\0';
   pcb->executing_file = fn_copy;
-  pcb->last_fd = 2;
 
   /* Create a new thread to execute FILE_NAME. */
   tid = thread_create (th_name, PRI_DEFAULT, start_process, pcb);
+
+  if (tid == TID_ERROR) {
+    goto err_create;
+  }
 
   /* This waits for process initialization */
   sema_down(&pcb->proc_init);
@@ -89,12 +95,15 @@ process_execute (const char *file_name)
   else {
     /* Add the child processes to our curr_th child_list */
     list_push_back(&pcb->parent_thread->child_list, &pcb->elem);
+    palloc_free_page(th_name);
+    palloc_free_page(fn_copy);
   }
 
   return pcb->pid;
 
 err_create:
   if(pcb) palloc_free_page(pcb);
+  if(th_name) palloc_free_page(th_name);
   if(fn_copy) palloc_free_page(fn_copy);
   return TID_ERROR;
 }
@@ -111,16 +120,23 @@ start_process (void *pcb_)
   char *file_name = pcb->executing_file;
   struct thread *curr_th = thread_current();
   struct intr_frame if_;
-  bool success;
+  bool success = false;
 
   /* MAG: parse argvs before loading file*/
-  args_list_t args_l;
+  args_list_t *args_l;
+  /* Freeing memory for this struct is in push_args function call */
+  args_l = palloc_get_page(0);
+  if (args_l == NULL) {
+    /* Not enough memory for arguments */
+    goto start_stop;
+  }
   unsigned int argv_size = 0;
-  create_args_list(&args_l, file_name, &argv_size);
+  create_args_list(args_l, file_name, &argv_size);
+  /* After we create args list we can free the copy */
 
   /* MAG: last element of list is the filename */
   struct list_elem *e;
-  e = list_rbegin(&args_l);
+  e = list_rbegin(args_l);
   argv_t *filename;
   filename = list_entry(e, argv_t, elem);
 
@@ -130,21 +146,18 @@ start_process (void *pcb_)
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
 
-
-  /* Also deny writes to this file while running */
-  curr_th->curr_file = filesys_open(file_name);
-  if (curr_th->curr_file != NULL) {
-    file_deny_write (curr_th->curr_file);
-  }
-  success = load (filename->value, &if_.eip, &if_.esp);
-
-  /* Add the current thread as a child to the parent thread */
+  /* Link the curr pcb to the thread */
   curr_th->pcb = pcb;
+
+  success = load (filename->value, &if_.eip, &if_.esp);
   
+start_stop:
   if (!success){
     pcb->pid = PID_ERROR;
   } else {
     pcb->pid = curr_th->tid;
+    /* Push args before calling the process */
+    push_args(args_l, &if_.esp, argv_size);
   }
   /* Release lock after the process has/has not been successfully loaded */
   sema_up(&pcb->proc_init);
@@ -153,8 +166,6 @@ start_process (void *pcb_)
   if(pcb->pid == PID_ERROR){
     sys_exit(-1);
   }
-  /* Push args before calling the process */
-  push_args(&args_l, &if_.esp, argv_size);
   
 
   /* Start the user process by simulating a return from an
@@ -174,6 +185,8 @@ void push_args(args_list_t *args_list, void **esp, unsigned int argv_size){
   unsigned int total_arg_size = argv_size + (list_size(args_list) + 3) * sizeof(char*);
   unsigned int align_stack = ((total_arg_size - 1) | (0x10 - 1)) + 1;
   unsigned int diff_align = align_stack - total_arg_size;
+
+  size_t argc = list_size(args_list);
   /* Iterate through the list, push the argv string on stack and save pointer*/
   argv_t *arg;
   struct list_elem *e;
@@ -194,22 +207,27 @@ void push_args(args_list_t *args_list, void **esp, unsigned int argv_size){
   memset(*esp, 0, sizeof(char*));
   
   /* Push argv address pointers */
-  for(e = list_begin(args_list); e != list_end(args_list); e = list_next(e)){
+  /* After this point we no longer need the list so we can destroy it */
+  while (!list_empty(args_list)) {
+    e = list_pop_front(args_list);
     arg = list_entry(e, argv_t, elem);
     *esp -= sizeof(unsigned int);
-    memcpy(*esp, &(arg->vaddr), sizeof(unsigned int));
+    memcpy(*esp, &(arg->vaddr), sizeof(unsigned int)); 
+    palloc_free_page(arg->value);
+    palloc_free_page(arg);
   }
+
   /* Push argv = address of argv[0] pointer, 
      argc and return address */
   unsigned int argv_start = (unsigned int) *esp;
   *esp -= sizeof(unsigned int);
   memcpy(*esp, &argv_start, sizeof(unsigned int));
 
-  size_t argc = list_size(args_list);
   *esp -= sizeof(unsigned int);
   memcpy(*esp, &argc, sizeof(unsigned int));
 
   *esp -= sizeof(void *);
+  memset(*esp, 0, sizeof(void *));
 }
 
 /* Parses cmd and created a new pintos list with argv */
@@ -233,7 +251,9 @@ void create_args_list(args_list_t *argvl, char *cmd, unsigned int *argv_size){
        Until it is pushed on the stack */
     *argv_size += strlen(token) + 1;
     if(add_argv(argvl, token, 0) == NULL){
-      printf("ERR: Could not add argv to list\n");
+      printf("--cacat--\n");
+      /* No more space on stack */
+      break;
     }
   }
  
@@ -244,7 +264,13 @@ void create_args_list(args_list_t *argvl, char *cmd, unsigned int *argv_size){
 
 argv_t *add_argv(args_list_t *args, char *argv, unsigned int vaddr){
   argv_t *arg = palloc_get_page(0);
+  if (arg == NULL) {
+    return NULL;
+  } 
   arg->value = palloc_get_page(0);
+  if (arg->value == NULL) {
+    return NULL; 
+  }
   strlcpy(arg->value, argv, (strlen(argv) + 1));
   /* Check vaddr to not access kernel */
   if(vaddr < (unsigned int)PHYS_BASE){
@@ -279,7 +305,7 @@ process_wait (tid_t child_tid UNUSED)
 
   /* Check if tid was terminated by the kernel */
   if(child_tid == -1){
-    goto err_wait;
+    return -1;
   }
 
   if(!list_empty(&curr_th->child_list)) {
@@ -292,8 +318,6 @@ process_wait (tid_t child_tid UNUSED)
         break;
       }
     }
-  } else {
-    goto err_wait;
   }
 
   if(!child_proc){
@@ -309,7 +333,7 @@ process_wait (tid_t child_tid UNUSED)
 
   /* Wait for the child process to finish */
   if(child_proc->exited == false){
-    sema_down(&child_proc->wait);
+    sema_down(&(child_proc->wait));
   }
 
   /* Save the exit status of the child process */
@@ -322,10 +346,6 @@ process_wait (tid_t child_tid UNUSED)
   palloc_free_page(child_proc);
 
   return exit_status; 
-
-err_wait:
-  if(child_proc) palloc_free_page(child_proc);
-  return -1;
 }
 
 /* Free the current process's resources. */
@@ -338,17 +358,14 @@ process_exit (void)
   while (!list_empty(&curr_th->fd_list)) {
     struct list_elem *e = list_pop_front(&curr_th->fd_list);
     struct file_descriptor *curr_fd = list_entry(e, struct file_descriptor, elem);
-    if (curr_fd != NULL) {
-      file_close(curr_fd->file);
-      palloc_free_page(curr_fd);
-    }
+
+    ASSERT (curr_fd != NULL);
+    ASSERT (curr_fd->file != NULL);
+
+    file_close(curr_fd->file);
+    palloc_free_page(curr_fd); 
   }
 
-  /* Allow write */
-  if (curr_th->curr_file != NULL) {
-    file_allow_write(curr_th->curr_file);
-    file_close(curr_th->curr_file);
-  }
 
   /* MAG: iterate through the entire list of child processes
      and assign them the proper status */
@@ -367,6 +384,11 @@ process_exit (void)
   }
 
 
+  /* Allow write */
+  if (curr_th->curr_file != NULL) {
+    file_allow_write(curr_th->curr_file);
+    file_close(curr_th->curr_file);
+  }
   /* Flag the current process as exited */
   curr_th->pcb->exited = true;
 
@@ -594,11 +616,14 @@ load (const char *file_name, void (**eip) (void), void **esp)
   /* Start address. */
   *eip = (void (*) (void)) ehdr.e_entry;
 
+  /* Deny write for the current running program */
+  file_deny_write(file);
+  thread_current()->curr_file = file;
+
   success = true;
 
  done:
   /* We arrive here whether the load is successful or not. */
-  file_close (file);
   return success;
 }
 
